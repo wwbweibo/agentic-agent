@@ -2,12 +2,16 @@
 会话管理 - 管理多 Agent 系统的会话状态。
 """
 
+import asyncio
 import json
+import sqlite3
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from .agents.base import Agent
-from .agents.helpers import extract_transfer_target, is_transfer_call
 
 
 class SessionStorage:
@@ -77,6 +81,188 @@ class RedisSessionStorage(SessionStorage):
         await self.redis.delete(self.key)
         await self.redis.delete(self.response_key)
 
+class LocalFileSessionStorage(SessionStorage):
+    """使用本地 JSON 文件保存会话状态."""
+
+    def __init__(
+        self,
+        session_id: str,
+        storage_dir: str = "./.sessions",
+        ttl: int = 3600 * 24 * 7,
+    ):
+        super().__init__(session_id, ttl)
+        self._storage_dir = Path(storage_dir)
+        self._messages_path = self._storage_dir / f"{session_id}_messages.json"
+        self._response_path = self._storage_dir / f"{session_id}_response.json"
+        self._meta_path = self._storage_dir / f"{session_id}_meta.json"
+        self._ensure_dir()
+
+    def _ensure_dir(self) -> None:
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_meta(self) -> dict:
+        if self._meta_path.exists():
+            return json.loads(self._meta_path.read_text(encoding="utf-8"))
+        return {}
+
+    def _save_meta(self, meta: dict) -> None:
+        self._meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    async def save_messages(self, messages: list[dict]) -> None:
+        if not messages:
+            return
+        meta = self._load_meta()
+        meta["updated_at"] = time.time()
+        meta["expire_at"] = time.time() + self.ttl
+        self._save_meta(meta)
+        self._messages_path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+
+    async def save_response(self, response: list[dict[str, Any]]) -> None:
+        self._response_path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+
+    async def load_messages(self) -> list[dict]:
+        if not self._messages_path.exists():
+            return []
+        return json.loads(self._messages_path.read_text(encoding="utf-8"))
+
+    async def load_response(self) -> list[dict[str, Any]] | None:
+        if not self._response_path.exists():
+            return None
+        return json.loads(self._response_path.read_text(encoding="utf-8"))
+
+    async def clear(self) -> None:
+        for p in (self._messages_path, self._response_path, self._meta_path):
+            if p.exists():
+                p.unlink()
+
+class SQLiteSessionStorage(SessionStorage):
+    """使用 SQLite 数据库保存会话状态."""
+
+    def __init__(
+        self,
+        session_id: str,
+        db_path: str = "./.sessions/sessions.db",
+        ttl: int = 3600 * 24 * 7,
+    ):
+        super().__init__(session_id, ttl)
+        self._db_path = Path(db_path)
+        self._ensure_db()
+
+    def _ensure_db(self) -> None:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_messages (
+                session_id TEXT NOT NULL,
+                row_index INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                expire_at REAL NOT NULL,
+                PRIMARY KEY (session_id, row_index)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_response (
+                session_id TEXT PRIMARY KEY,
+                response TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                expire_at REAL NOT NULL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(self._db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _now(self) -> float:
+        return time.time()
+
+    async def save_messages(self, messages: list[dict]) -> None:
+        if not messages:
+            return
+        now = self._now()
+        expire_at = now + self.ttl
+
+        def _sync_save():
+            with self._conn() as conn:
+                # 清除旧记录（全量替换）
+                conn.execute("DELETE FROM session_messages WHERE session_id = ?", (self.session_id,))
+                for idx, msg in enumerate(messages):
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = json.dumps(content, ensure_ascii=False)
+                    conn.execute(
+                        """
+                        INSERT INTO session_messages (session_id, row_index, role, content, updated_at, expire_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (self.session_id, idx, role, content, now, expire_at),
+                    )
+                conn.commit()
+
+        await asyncio.to_thread(_sync_save)
+
+    async def save_response(self, response: list[dict[str, Any]]) -> None:
+        now = self._now()
+        expire_at = now + self.ttl
+
+        def _sync_save():
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO session_response (session_id, response, updated_at, expire_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (self.session_id, json.dumps(response, ensure_ascii=False), now, expire_at),
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_sync_save)
+
+    async def load_messages(self) -> list[dict]:
+        def _sync_load():
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY row_index",
+                    (self.session_id,),
+                ).fetchall()
+                return [{"role": r[0], "content": r[1]} for r in rows]
+
+        return await asyncio.to_thread(_sync_load)
+
+    async def load_response(self) -> list[dict[str, Any]] | None:
+        def _sync_load():
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT response FROM session_response WHERE session_id = ?",
+                    (self.session_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                return json.loads(row[0])
+
+        return await asyncio.to_thread(_sync_load)
+
+    async def clear(self) -> None:
+        def _sync_clear():
+            with self._conn() as conn:
+                conn.execute("DELETE FROM session_messages WHERE session_id = ?", (self.session_id,))
+                conn.execute("DELETE FROM session_response WHERE session_id = ?", (self.session_id,))
+                conn.commit()
+
+        await asyncio.to_thread(_sync_clear)
 
 class AgentSession:
     """Agent 会话管理类，协调多个 Agent 的执行。"""
@@ -196,10 +382,6 @@ class AgentSession:
 
         epoch = 0
         while True:
-            if epoch >= self.max_epochs:
-                yield {"resp_type": "error", "content": "Maximum number of epochs reached."}
-                break
-
             active_agent = self.agents.get(self.active_agent_name)
             if not active_agent:
                 error_msg = f"Agent {self.active_agent_name} not found."
@@ -209,8 +391,12 @@ class AgentSession:
 
             yield {"resp_type": "status", "content": f"Agent {self.active_agent_name} is thinking..."}
 
+            epoch += 1
+            if epoch >= self.max_epochs:
+                yield {"resp_type": "error", "content": "Maximum number of epochs reached."}
+                break
+
             try:
-                epoch += 1
                 next_agent_name: str | None = None
                 reason = "No reason provided"
 
@@ -231,7 +417,6 @@ class AgentSession:
                             "content": content,
                         }
                     elif event_type == "transfer":
-                        tool_result = event.get("tool_result", "")
                         next_agent_name = event.get("to_agent", "")
                         reason = event.get("reason", "No reason provided")
 
@@ -252,8 +437,21 @@ class AgentSession:
                     await self.on_message_updated()
                     continue
                 else:
+                    if epoch >= self.max_epochs:
+                        yield {"resp_type": "error", "content": "Maximum number of epochs reached."}
+                        break
+                    if next_agent_name and next_agent_name not in self.agents:
+                        yield {
+                            "resp_type": "error",
+                            "content": f"Agent '{next_agent_name}' not found after transfer from {active_agent.name}.",
+                        }
+                        break
                     if self.success_callback:
                         await self.handle_success("Task completed successfully.")
+                        yield {"resp_type": "finished", "content": "Task processing completed."}
+                        await self.storage.save_messages(self.messages)
+                        break
+                    # 无 success_callback 且未转移：结束
                     yield {"resp_type": "finished", "content": "Task processing completed."}
                     await self.storage.save_messages(self.messages)
                     break
