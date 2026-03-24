@@ -1,4 +1,4 @@
-from openai import BaseModel
+from pydantic import BaseModel
 
 
 class AgentMeta(BaseModel):
@@ -8,12 +8,8 @@ class AgentMeta(BaseModel):
     skills: list[str]
     system_prompt: str
 
+
 class AgentConfig(BaseModel):
+    """Agent 配置文件结构."""
     metadata: dict
     agents: list[AgentMeta]
-
-class MCPServer(BaseModel):
-    """MCP Server 元信息."""
-    name: str
-    transport: str
-    connection_info: dict
