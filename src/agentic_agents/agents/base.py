@@ -1,7 +1,6 @@
-import json
 from typing import Any
 
-from ..llm.base import AgentMessage, ChatResult, LLMClient, ToolCall
+from ..llm.base import ChatResult, LLMClient, ToolCall
 from ..tools.base import AgentTool
 
 
@@ -32,12 +31,29 @@ class Agent:
         if not tool:
             return f"Error: Tool '{tool_call.name}' not found."
         try:
-            result = tool.execute(**tool_call.arguments)
-            # 支持 async 工具
-            import asyncio
-            if asyncio.iscoroutine(result):
-                result = asyncio.get_event_loop().run_until_complete(result)
-            return str(result)
+            # 对于lookup_skill工具，特殊处理，因为工具是在调用lookup_skill时动态添加给LLM的
+            if tool_call.name == "lookup_skill":
+                skill_name = tool_call.arguments.get("skill_name", "")
+                result, tools = tool.func(skill_name)
+                if len(tools) > 0:
+                    # 如果返回了工具，说明是技能查询，动态添加工具到 Agent 中
+                    self.tools.extend(tools)
+                    # 根据名称去重
+                    seen = set()
+                    unique_tools = []
+                    for t in self.tools:
+                        if t.name not in seen:
+                            unique_tools.append(t)
+                            seen.add(t.name)
+                    self.tools = unique_tools
+                return result
+            else:
+                result = tool.execute(**tool_call.arguments)
+                # 支持 async 工具
+                import asyncio
+                if asyncio.iscoroutine(result):
+                    result = asyncio.get_event_loop().run_until_complete(result)
+                return str(result)
         except Exception as e:
             return f"Error executing tool '{tool_call.name}': {e}"
 

@@ -45,7 +45,7 @@ class LoopingAgent:
         # 不转移，正常返回 → session 检查 max_epochs
 
 
-async def noop_factory(tenant_id: str, session_id: str, skill_dir: str) -> dict[str, MockAgent]:
+async def noop_factory(agent_config, session_id: str, skill_dir: str, **kwargs) -> dict[str, MockAgent]:
     return {
         "Router": MockAgent("Router", []),
         "Agent1": MockAgent("Agent1", []),
@@ -63,7 +63,7 @@ class TestAgentSessionBasic:
     @pytest.mark.asyncio
     async def test_process_empty_input_yields_nothing(self, mock_agent_factory):
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=mock_agent_factory,
         )
@@ -73,7 +73,7 @@ class TestAgentSessionBasic:
     @pytest.mark.asyncio
     async def test_agent_not_found_yields_error(self, mock_agent_factory):
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=mock_agent_factory,
             entry_agent="NonExistent",
@@ -85,11 +85,11 @@ class TestAgentSessionBasic:
     @pytest.mark.asyncio
     async def test_max_epochs_yields_error(self):
         """LoopingAgent 返回后，epoch 已达上限，触发 max_epochs 错误."""
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {"Router": LoopingAgent("Router", epochs_per_call=1)}
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             max_epochs=1,
@@ -102,14 +102,14 @@ class TestAgentSessionBasic:
         """MockAgent 不 yield 任何事件，session 正常结束并触发 success_callback."""
         called = {}
 
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {"Router": MockAgent("Router", [])}
 
         async def on_success(session, message, messages, response):
             called["fired"] = True
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             success_callback=on_success,
@@ -127,7 +127,7 @@ class TestAgentSessionBasic:
             called["message"] = message
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=noop_factory,
             entry_agent="NonExistent",
@@ -140,7 +140,7 @@ class TestAgentSessionBasic:
 
     @pytest.mark.asyncio
     async def test_text_event_forwarded(self):
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "text", "agent": "Router", "content": "Hello!"},
@@ -148,7 +148,7 @@ class TestAgentSessionBasic:
             }
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             max_epochs=2,
@@ -163,7 +163,7 @@ class TestAgentSessionBasic:
 
     @pytest.mark.asyncio
     async def test_tool_result_event_forwarded(self):
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "tool_result", "agent": "Router", "content": "tool output"},
@@ -171,7 +171,7 @@ class TestAgentSessionBasic:
             }
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             max_epochs=2,
@@ -194,7 +194,7 @@ class TestAgentSessionStorageIntegration:
 
     @pytest.mark.asyncio
     async def test_memory_storage_persists_messages_across_turns(self):
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "text", "agent": "Router", "content": "response1"},
@@ -204,7 +204,7 @@ class TestAgentSessionStorageIntegration:
         storage = SessionStorage("s1")
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             storage=storage,
@@ -217,7 +217,7 @@ class TestAgentSessionStorageIntegration:
 
         # 第二轮：session 重用同一 storage，继续累积消息
         session2 = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             storage=storage,
@@ -231,7 +231,7 @@ class TestAgentSessionStorageIntegration:
     async def test_local_file_storage_round_trip(self, tmp_path):
         storage_dir = str(tmp_path / "sessions")
 
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "text", "agent": "Router", "content": "saved response"},
@@ -240,7 +240,7 @@ class TestAgentSessionStorageIntegration:
 
         storage = LocalFileSessionStorage("s2", storage_dir=storage_dir)
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s2",
             agent_factory=factory,
             storage=storage,
@@ -251,7 +251,7 @@ class TestAgentSessionStorageIntegration:
         # 重启 session，从文件加载消息
         storage2 = LocalFileSessionStorage("s2", storage_dir=storage_dir)
         session2 = AgentSession(
-            tenant_id="t1",
+            
             session_id="s2",
             agent_factory=factory,
             storage=storage2,
@@ -266,7 +266,7 @@ class TestAgentSessionStorageIntegration:
     async def test_sqlite_storage_round_trip(self, tmp_path):
         db_path = str(tmp_path / "sessions" / "test.db")
 
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "text", "agent": "Router", "content": "sqlite response"},
@@ -275,7 +275,7 @@ class TestAgentSessionStorageIntegration:
 
         storage = SQLiteSessionStorage("s3", db_path=db_path)
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s3",
             agent_factory=factory,
             storage=storage,
@@ -286,7 +286,7 @@ class TestAgentSessionStorageIntegration:
         # 重启 session，从数据库加载消息
         storage2 = SQLiteSessionStorage("s3", db_path=db_path)
         session2 = AgentSession(
-            tenant_id="t1",
+            
             session_id="s3",
             agent_factory=factory,
             storage=storage2,
@@ -307,7 +307,7 @@ class TestAgentSessionTransfer:
 
     @pytest.mark.asyncio
     async def test_transfer_yields_transfer_event(self):
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {"type": "text", "agent": "Router", "content": "transferring..."},
@@ -325,7 +325,7 @@ class TestAgentSessionTransfer:
             }
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             max_epochs=5,
@@ -339,7 +339,7 @@ class TestAgentSessionTransfer:
     @pytest.mark.asyncio
     async def test_transfer_to_unknown_agent_no_finished(self):
         """转移到不存在的 Agent，目标不在 agents 字典中，yield error."""
-        async def factory(tenant_id: str, session_id: str, skill_dir: str):
+        async def factory(agent_config, session_id: str, skill_dir: str, **kwargs):
             return {
                 "Router": MockAgent("Router", [
                     {
@@ -353,7 +353,7 @@ class TestAgentSessionTransfer:
             }
 
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=factory,
             max_epochs=5,
@@ -375,7 +375,7 @@ class TestCompressContext:
         """转移目标不是 Router 时不压缩."""
         storage = SessionStorage("s1")
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=noop_factory,
             storage=storage,
@@ -395,7 +395,7 @@ class TestCompressContext:
         """转移回 Router 时，截断到转交点，添加摘要，再追加转交消息."""
         storage = SessionStorage("s1")
         session = AgentSession(
-            tenant_id="t1",
+            
             session_id="s1",
             agent_factory=noop_factory,
             storage=storage,

@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from loguru import logger
 
 from .agents.base import Agent
 
@@ -46,7 +47,6 @@ class SessionStorage:
         """清除会话状态."""
         self._messages = []
         self._response = []
-
 
 class RedisSessionStorage(SessionStorage):
     """使用 Redis 来保存会话状态."""
@@ -269,7 +269,6 @@ class AgentSession:
 
     def __init__(
         self,
-        tenant_id: str,
         session_id: str,
         agent_factory: Callable[..., Awaitable[dict[str, Agent]]],
         skill_dir: str = "./skills",
@@ -278,8 +277,10 @@ class AgentSession:
         max_epochs: int = 10,
         error_callback: Callable[..., Awaitable[None]] | None = None,
         success_callback: Callable[..., Awaitable[None]] | None = None,
+        agent_config: dict | None = None,
+        llm: Any = None,
+        **kwargs,
     ):
-        self.tenant_id = tenant_id
         self.session_id = session_id
         self.storage = storage or SessionStorage(session_id)
         self.messages: list[dict] = []  # OpenAI 格式的消息列表
@@ -290,6 +291,9 @@ class AgentSession:
         self.skill_dir = skill_dir
         self.error_callback = error_callback
         self.success_callback = success_callback
+        self.agent_config = agent_config
+        self.llm = llm
+        self.extra_kwargs = kwargs
 
     async def on_message_updated(self) -> None:
         """当消息更新时调用，保存当前状态到存储."""
@@ -366,15 +370,18 @@ class AgentSession:
     async def process_message(self, user_input: str) -> AsyncGenerator[dict[str, Any], None]:
         """处理用户输入，yield 事件流。"""
         if not user_input.strip():
+            logger.warning("Received empty user input, ignoring.")
             return
 
         if not self.messages:
             self.messages = await self.storage.load_messages()
+            logger.debug(f"Loaded messages from storage, total {len(self.messages)} messages.")
 
         if self.agents is None:
             self.agents = await self.agent_factory(
-                self.tenant_id, self.session_id, self.skill_dir
+                self.agent_config, self.session_id, self.skill_dir, llm=self.llm
             )
+            logger.debug(f"Initialized agents: {list(self.agents.keys())}")
 
         # 添加用户消息
         self.messages.append({"role": "user", "content": user_input})
@@ -385,6 +392,7 @@ class AgentSession:
             active_agent = self.agents.get(self.active_agent_name)
             if not active_agent:
                 error_msg = f"Agent {self.active_agent_name} not found."
+                logger.error(error_msg)
                 await self.handle_error(error_msg)
                 yield {"resp_type": "error", "content": error_msg}
                 break

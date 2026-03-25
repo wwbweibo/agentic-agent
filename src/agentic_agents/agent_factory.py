@@ -6,17 +6,16 @@ import logging
 import os
 from typing import Any
 
-from .llm.base import LLMClient
-from .llm.openai_client import OpenAIClient
-from .llm.anthropic_client import AnthropicClient
-
-from .agents.agent_meta import AgentConfig
+from .agents.agent_meta import AgentConfig, MCPServerConfig
 from .agents.base import Agent
 from .agents.handoff import create_transfer_tool
+from .llm import AnthropicClient, OpenAIClient
+from .llm.base import LLMClient
+from .mcp import connect_mcp_server
 from .skills.loader import Skill, load_skills_from_directory
-from .skills.meta_tools import lookup_skill_tool, set_global_skills
+from .skills.meta_tools import lookup_skill, set_global_skills
 from .tools.base import AgentTool
-from .tools.basic_tools import current_time_tool
+from .tools.basic_tools import current_time
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +32,64 @@ def _make_llm(provider: str = "openai", **kwargs) -> LLMClient:
     return OpenAIClient(**kwargs)
 
 
+async def _connect_mcp_servers(
+    servers: list[MCPServerConfig],
+) -> dict[str, list[AgentTool]]:
+    """连接 MCP 服务器并返回工具映射。
+
+    Args:
+        servers: MCP 服务器配置列表
+
+    Returns:
+        服务器名称到工具列表的映射
+    """
+    server_tools: dict[str, list[AgentTool]] = {}
+
+    for server in servers:
+        logger.info(f"Connecting MCP server: {server.name} (transport={server.transport})")
+
+        # 根据传输类型准备参数
+        kwargs: dict[str, Any] = {}
+        if server.transport == "stdio":
+            kwargs["command"] = server.command
+            if server.args:
+                kwargs["args"] = server.args
+            if server.env:
+                kwargs["env"] = server.env
+            if server.cwd:
+                kwargs["cwd"] = server.cwd
+        elif server.transport in ("http", "sse"):
+            kwargs["url"] = server.url
+            if server.auth:
+                kwargs["auth"] = server.auth
+            if server.headers:
+                kwargs["headers"] = server.headers
+        else:
+            logger.warning(f"Unknown MCP transport: {server.transport}")
+            continue
+
+        try:
+            tools = await connect_mcp_server(
+                name=server.name,
+                transport=server.transport,
+                **kwargs,
+            )
+            server_tools[server.name] = tools
+            logger.info(f"MCP server '{server.name}' connected with {len(tools)} tools")
+        except Exception as e:
+            logger.error(f"Failed to connect MCP server '{server.name}': {e}")
+
+    return server_tools
+
+
 async def build_agent(
     name: str,
     duty: str,
     skills: list[Skill],
     llm: LLMClient,
     prompt: str,
-    tenant_id: str = "",
     session_id: str = "",
+    mcp_tools: list[AgentTool] | None = None,
 ) -> Agent:
     """Build a single agent with given skills and llm.
 
@@ -52,58 +101,55 @@ async def build_agent(
         prompt: System prompt for the agent
         tenant_id: Current tenant ID, can be used in the prompt for data scoping
         session_id: Current session ID, can be used in the prompt for data scoping
+        mcp_tools: MCP tools available to this agent
     """
-    tools: list[AgentTool] = []
-
-    # 从 skills 中收集工具
-    for skill in skills:
-        tools.extend(skill.tools)
+    tools: list[AgentTool] = list(mcp_tools) if mcp_tools else []
 
     # 添加内置工具
-    tools.append(lookup_skill_tool)
+    tools.append(lookup_skill)
     tools.append(create_transfer_tool(
         "Router",
         "当完成了你当前的任务，或者无法继续完成任务时，使用该工具将控制权交还给 Router。并简要说明交还控制权的原因。",
     ))
-    tools.append(current_time_tool)
+    tools.append(current_time)
 
     skill_desc = [f"- {s.name}: {s.description}" for s in skills]
     skill_list = "\n\t".join(skill_desc)
 
-    system_prompt = f"""You are {name}
-{prompt}
-your capabilities are determined by the skills and tools you have, you can not do anything beyond your skills.
-Each skill has its own specific instructions and available tools.
+    system_prompt = f"""你是一个专业的任务执行代理，名为 {name}。
 
-You got the following skills and tools, please use them to help you complete the task:
+【你的职责】
+{prompt}
+
+【工作流程】
+1. 理解用户的需求
+2. 使用 ReAct 模式完成任务：思考(Thought) -> 行动(Action) -> 观察(Observation)
+3. 完成任务后，将结果返回给用户
+
+【技能说明】
+你有以下可用的技能和工具：
 {skill_list}
 
-Please read carefully the instruction of each skill and use the tools provided by the skill using `lookup_skill` tool.
-For External Tools, you can use them directly.
+使用 `lookup_skill` 工具可以查看技能的详细说明和使用方法。
 
-you have these tools available:
-{chr(10).join([f"- {t.name}: {t.description}, tags: {t.tags}" for t in tools])}
+【工具说明】
+可用的外部工具：
+{chr(10).join([f"- {t.name}: {t.description}" for t in tools if t.name != 'lookup_skill'])}
 
-【Important】: you can see multiple tools,
-but only tools without tags are avaliable before you use `lookup_skill` to check the instructions of the skill you have.
-so please make sure to use `lookup_skill` to check the instruction of the skill before using other tools.
+【重要规则】
+1. 用中文回复
+2. 不要编造信息，不知道的就说不知道
+3. 当前会话 ID: {session_id}
 
-If you encounter a task that is beyond your capabilities,
-use `transfer_to_Router` tool to transfer control back to Router.
-Router will reassign the task to other agents or handle it by itself.
+【任务完成标准】
+当你满足以下任一条件时，调用 `transfer_to_Router` 工具返回控制权：
+- 任务已完成，能给出明确的答案或结果
+- 任务超出你的能力范围
+- 遇到错误无法继续
 
-When you complete the task, call `transfer_to_Router` tool to transfer control back to Router and report the result to Router in the reason parameter.
-**Important**: You can ONLY Transfer control to Router. You CANNOT transfer control to any other agent, because you don't know who are the other agents, and transferring to unknown agents may cause loss of control.
-
-Please flow the instructions blow:
-1. Please make sure that all your answers are in 「Chinese」.
-2. Do not make up any information. If you don't know, say you don't know. If there are no data, say no data.
-3. Current session_id is {session_id}. You can use this session_id to query data within the current session scope.
-4. Current tenant_id is {tenant_id}. You can use this tenant_id to query data within the current tenant scope.
-
-You MUST follow the react pattern to complete the task.
-The react pattern is a loop of "Thought -> Action -> Observation",
-which can help you to complete the task step by step and check the result of each step.
+在 reason 参数中简要说明：
+- 已完成的任务：给出答案摘要
+- 未完成的任务：说明原因和已尝试的方法
 """
 
     return Agent(
@@ -116,20 +162,17 @@ which can help you to complete the task step by step and check the result of eac
 
 
 async def build_agents(
-    tenant_id: str,
+    agent_config: AgentConfig,
     session_id: str,
     skills_dir: str,
     llm: LLMClient | None = None,
-    agent_config_path: str = "agents.json",
 ) -> dict[str, Agent]:
     """构建所有 Agents 的工厂函数，返回一个字典映射 agent_name -> Agent 实例.
 
     Args:
-        tenant_id: 租户 ID
         session_id: 会话 ID
         skills_dir: 技能目录路径
         llm: LLM 客户端，不提供则使用默认的 OpenAI 客户端
-        agent_config_path: Agent 配置文件路径
     """
     all_skills = load_skills_from_directory(skills_dir)
     set_global_skills(all_skills)
@@ -142,28 +185,32 @@ async def build_agents(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL"),
         )
-
-    if not os.path.exists(agent_config_path):
-        logger.warning(f"Agent config file not found: {agent_config_path}")
-        agent_config = AgentConfig(metadata={}, agents=[])
-    else:
-        agent_config_content = open(agent_config_path).read()
-        logger.info(f"Loaded agent configuration: {agent_config_content}")
-        agent_config = AgentConfig.model_validate_json(agent_config_content)
+    # 连接 MCP 服务器
+    server_tools: dict[str, list[AgentTool]] = {}
+    if agent_config.mcp_servers:
+        logger.info(f"Connecting {len(agent_config.mcp_servers)} MCP servers...")
+        server_tools = await _connect_mcp_servers(agent_config.mcp_servers)
 
     router_tools: list[AgentTool] = []
 
     for agent_meta in agent_config.agents:
         skills = [skill_map.get(skill_name) for skill_name in agent_meta.skills]
         skills = [s for s in skills if s is not None]
+
+        # 收集该 Agent 关联的 MCP 工具
+        mcp_tools: list[AgentTool] = []
+        for server_name in agent_meta.mcp_servers:
+            if server_name in server_tools:
+                mcp_tools.extend(server_tools[server_name])
+
         agents[agent_meta.name] = await build_agent(
             name=agent_meta.name,
             duty=agent_meta.duty,
             skills=skills,
             llm=llm,
             prompt=agent_meta.system_prompt,
-            tenant_id=tenant_id,
             session_id=session_id,
+            mcp_tools=mcp_tools,
         )
         router_tools.append(create_transfer_tool(
             agent_meta.name,
@@ -176,13 +223,21 @@ async def build_agents(
         llm=llm,
         tools=router_tools,
         system_prompt=f"""你是一个多智能体系统的接待员 (Router)。
-你的职责不是直接回答问题，而是理解用户的意图，并将任务分发给最合适的专家代理。
+你的职责是理解用户意图，将任务分发给最合适的专家代理，并汇总结果回复用户。
 
 可用代理:
 {chr(10).join([f"- {a.name}: {a.description} \n" for a in agents.values() if a.name != "Router"])}
 
-请使用对应的 transfer 工具进行转发。
-如果用户只是打招呼或闲聊，你可以直接回复。
+【重要】指令：
+1. 如果用户只是打招呼或闲聊，可以直接回复。
+2. 如果需要转移任务，使用 transfer 工具。
+3. 当其他 Agent 完成任务并将控制权交还给你时：
+   - 检查消息历史中的内容
+   - 如果任务已完成，直接用中文回复用户最终结果
+   - 不要再次尝试分发已经完成的任务！
+4. 你的回复将直接呈现给用户，请确保回复完整、友好。
+
+回复格式：直接给出答案或结论，不需要额外说明你做了什么。
 """,
     )
     return agents

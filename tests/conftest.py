@@ -62,7 +62,7 @@ def mock_agent_factory():
             return
             yield  # make it an async generator
 
-    async def factory(tenant_id: str, session_id: str, skill_dir: str):
+    async def factory(agent_config, session_id: str, skill_dir: str, llm=None):
         return {
             "Router": MockAgent("Router"),
             "Agent1": MockAgent("Agent1"),
@@ -75,8 +75,8 @@ def mock_agent_factory():
 def session_with_mocks(mock_agent_factory):
     """返回使用 mock factory 的 AgentSession（使用内存存储）."""
     return AgentSession(
-        tenant_id="test-tenant",
         session_id="test-session",
         agent_factory=mock_agent_factory,
+        skill_dir="./skills",
         storage=SessionStorage("test-session"),
     )
