@@ -23,6 +23,8 @@ class Agent:
 
     def _tool_definitions(self) -> list[dict]:
         """将工具列表转换为 LLM 工具定义格式."""
+        if not self.tools:
+            return []
         return [tool.to_dict() for tool in self.tools]
 
     def _execute_tool(self, tool_call: ToolCall) -> str:
@@ -82,14 +84,10 @@ class Agent:
         ]
         messages.extend(input_messages)
 
-        tool_definitions = self._tool_definitions()
-
         in_epoch = 0
         while True:
             in_epoch += 1
             if in_epoch > self.max_epochs:
-                print("-" * 100)
-                print(f"DEBUG {self.name}: Maximum epochs reached, forcing transfer.")
                 yield {
                     "type": "transfer",
                     "from_agent": self.name,
@@ -100,15 +98,10 @@ class Agent:
                 return
 
             # 调用 LLM
-            try:
-                result: ChatResult = await self.llm.chat(
-                    messages=messages,
-                    tools=tool_definitions if tool_definitions else None,
-                )
-            except Exception as e:
-                print("-" * 100)
-                print(f"DEBUG {self.name}: LLM call error: {e}")
-                raise e
+            result: ChatResult = await self.llm.chat(
+                messages=messages,
+                tools=self._tool_definitions(),
+            )
 
             msg = result.message
 
@@ -124,15 +117,20 @@ class Agent:
             if msg.tool_calls:
                 for tool_call in msg.tool_calls:
                     # 将 assistant 的 tool_call 添加到消息历史
+                    import json as _json
+                    _args = tool_call.arguments
+                    if not isinstance(_args, str):
+                        _args = _json.dumps(_args, ensure_ascii=False)
                     messages.append({
                         "role": "assistant",
                         "content": msg.content or None,
                         "tool_calls": [
                             {
                                 "id": tool_call.id,
+                                "type": "function",
                                 "function": {
                                     "name": tool_call.name,
-                                    "arguments": tool_call.arguments,
+                                    "arguments": _args,
                                 },
                             }
                         ],

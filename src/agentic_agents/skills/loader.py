@@ -47,11 +47,10 @@ def load_skills_from_directory(skills_dir: str) -> list[Skill]:
 
         try:
             # 1. 解析 skill.md
-            with open(md_path, encoding="utf-8") as f:
-                post = frontmatter.load(f)
-                name = str(post.metadata.get("name", item))
-                description = str(post.metadata.get("description", ""))
-                instruction = str(post.content)  # Markdown 正文作为 instruction
+            post = frontmatter.Frontmatter.read_file(md_path)
+            name = str(post["attributes"].get("name", item))
+            description = str(post["attributes"].get("description", ""))
+            instruction = str(post["body"])  # Markdown 正文作为 instruction
 
             # 2. 动态加载 tools.py
             module_name = f"skills.dynamic.{item}"

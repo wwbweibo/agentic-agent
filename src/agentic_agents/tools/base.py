@@ -86,23 +86,26 @@ def tool(
             # 尝试从函数签名自动生成参数定义
             sig = inspect.signature(func)
             props = {}
+            required_props = []
             for param in sig.parameters.values():
                 prop_name = param.name
                 if param.annotation != inspect.Parameter.empty:
                     # 简单映射 Python 类型到 JSON Schema 类型
                     if param.annotation in (str, int, float, bool):
-                        props[prop_name] = {"type": param.annotation.__name__}
+                        type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
+                        props[prop_name] = {"type": type_map.get(param.annotation, "string")}
                     else:
                         props[prop_name] = {"type": "string"}  # 默认复杂类型为字符串
                     # 检查默认值来确定是否必需
                     if param.default == inspect.Parameter.empty:
-                        props[prop_name]["required"] = True
+                        required_props.append(prop_name)
                 else:
                     props[prop_name] = {"type": "string"}  # 无注解默认字符串
+                    required_props.append(prop_name)
             tool_parameters = {
                 "type": "object",
                 "properties": props,
-                "required": [k for k, v in props.items() if v.get("required")],
+                "required": [k for k, v in props.items() if k in required_props],
             }
         return create_tool(
             name=tool_name,
