@@ -12,6 +12,7 @@ from .agents.handoff import create_transfer_tool
 from .llm import AnthropicClient, OpenAIClient
 from .llm.base import LLMClient
 from .mcp import connect_mcp_server, get_mcp_client, disconnect_mcp_server
+from .mcp.tools import mcp_tools_to_agent_tools
 from .skills.loader import Skill, load_skills_from_directory
 from .skills.meta_tools import lookup_skill, set_global_skills
 from .tools.base import AgentTool
@@ -51,8 +52,8 @@ async def _connect_mcp_servers(
         if client:
             try:
                 logger.info(f"MCP server '{server.name}' is already connected, skipping...")
-                tools = await client.list_tools()
-                server_tools[server.name] = tools
+                mcp_tools = await client.list_tools()
+                server_tools[server.name] = mcp_tools_to_agent_tools(mcp_tools, client)
                 continue
             except Exception as e:
                 logger.error(f"Failed to list tools from already connected MCP server '{server.name}': {e}")
