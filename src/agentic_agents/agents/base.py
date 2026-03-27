@@ -27,7 +27,7 @@ class Agent:
             return []
         return [tool.to_dict() for tool in self.tools]
 
-    def _execute_tool(self, tool_call: ToolCall) -> str:
+    async def _execute_tool(self, tool_call: ToolCall) -> str:
         """执行单个工具调用."""
         tool = next((t for t in self.tools if t.name == tool_call.name), None)
         if not tool:
@@ -54,7 +54,7 @@ class Agent:
                 # 支持 async 工具
                 import asyncio
                 if asyncio.iscoroutine(result):
-                    result = asyncio.get_event_loop().run_until_complete(result)
+                    result = await result
                 return str(result)
         except Exception as e:
             return f"Error executing tool '{tool_call.name}': {e}"
@@ -155,7 +155,7 @@ class Agent:
                         return
                     else:
                         # 普通工具调用：执行并添加结果
-                        tool_result_str = self._execute_tool(tool_call)
+                        tool_result_str = await self._execute_tool(tool_call)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,

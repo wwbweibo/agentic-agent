@@ -11,7 +11,7 @@ from .agents.base import Agent
 from .agents.handoff import create_transfer_tool
 from .llm import AnthropicClient, OpenAIClient
 from .llm.base import LLMClient
-from .mcp import connect_mcp_server
+from .mcp import connect_mcp_server, get_mcp_client, disconnect_mcp_server
 from .skills.loader import Skill, load_skills_from_directory
 from .skills.meta_tools import lookup_skill, set_global_skills
 from .tools.base import AgentTool
@@ -47,40 +47,51 @@ async def _connect_mcp_servers(
 
     for server in servers:
         logger.info(f"Connecting MCP server: {server.name} (transport={server.transport})")
-
-        # 根据传输类型准备参数
-        kwargs: dict[str, Any] = {}
-        if server.transport == "stdio":
-            kwargs["command"] = server.command
-            if server.args:
-                kwargs["args"] = server.args
-            if server.env:
-                kwargs["env"] = server.env
-            if server.cwd:
-                kwargs["cwd"] = server.cwd
-        elif server.transport in ("http", "sse"):
-            kwargs["url"] = server.url
-            if server.auth:
-                kwargs["auth"] = server.auth
-            if server.headers:
-                kwargs["headers"] = server.headers
-        else:
-            logger.warning(f"Unknown MCP transport: {server.transport}")
-            continue
-
-        try:
-            tools = await connect_mcp_server(
-                name=server.name,
-                transport=server.transport,
-                **kwargs,
-            )
-            server_tools[server.name] = tools
-            logger.info(f"MCP server '{server.name}' connected with {len(tools)} tools")
-        except Exception as e:
-            logger.error(f"Failed to connect MCP server '{server.name}': {e}")
+        client = get_mcp_client(server.name)  # 检查是否已连接
+        if client:
+            try:
+                logger.info(f"MCP server '{server.name}' is already connected, skipping...")
+                tools = await client.list_tools()
+                server_tools[server.name] = tools
+                continue
+            except Exception as e:
+                logger.error(f"Failed to list tools from already connected MCP server '{server.name}': {e}")
+                # 如果连接有问题，继续尝试重新连接
+                await disconnect_mcp_server(server.name)
+        tools = await _connect_single_mcp_server(server)
+        server_tools[server.name] = tools
 
     return server_tools
 
+async def _connect_single_mcp_server(server: MCPServerConfig) -> list[AgentTool]:
+    kwargs: dict[str, Any] = {}
+    if server.transport == "stdio":
+        kwargs["command"] = server.command
+        if server.args:
+            kwargs["args"] = server.args
+        if server.env:
+            kwargs["env"] = server.env
+        if server.cwd:
+            kwargs["cwd"] = server.cwd
+    elif server.transport in ("http", "sse"):
+        kwargs["url"] = server.url
+        if server.auth:
+            kwargs["auth"] = server.auth
+        if server.headers:
+            kwargs["headers"] = server.headers
+    else:
+        logger.warning(f"Unknown MCP transport: {server.transport}")
+        return []
+    try:
+        tools = await connect_mcp_server(
+            name=server.name,
+            transport=server.transport,
+            **kwargs,
+        )
+        return tools
+    except Exception as e:
+        logger.error(f"Failed to connect MCP server '{server.name}': {e}")
+        return []
 
 async def build_agent(
     name: str,
